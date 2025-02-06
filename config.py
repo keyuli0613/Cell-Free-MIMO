@@ -23,7 +23,7 @@ NOISE_UL = 10 ** ((-96 - 30) / 10)   # 上行噪声功率
 NOISE_DL = 10 ** ((-96 - 30) / 10)   # 下行噪声功率
 
 # 功率设置（单位：W）
-UE_MAX_POWER = 0.01      # 每个UE的最大上行功率（例如10 mW）
+UE_MAX_POWER = 0.01    # 每个UE的最大上行功率（例如10 mW）
 AP_MAX_POWER = 0.1       # 每个AP的最大下行功率（例如100 mW）
 
 # 地理区域（单位：m）
@@ -38,3 +38,5 @@ ASD_ELEVATION = 15.0    # 仰角标准差，单位度
 BANDWIDTH = 10e6        # 10 MHz
 
 # 其他参数可根据需要扩展...
+MC_TRIALS = 100
+RHO_TOT = 1

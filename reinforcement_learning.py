@@ -1,26 +1,27 @@
 # reinforcement_learning.py
-# 初步框架：为后续结合 QoS、能耗等设计RL模型预留接口
 import numpy as np
 
 class RLAgent:
     def __init__(self, state_dim, action_dim):
         self.state_dim = state_dim
         self.action_dim = action_dim
-        # 初始化策略网络、价值网络等 (可以使用PyTorch/TensorFlow)
-        # self.policy = ...
-        # self.value = ...
-        
-    def select_action(self, state):
-        """
-        根据当前状态选择动作：例如为每个AP或UE分配功率、调度资源等
-        """
-        # 此处为占位代码：返回随机动作
-        return np.random.rand(self.action_dim)
     
-    def update(self, state, action, reward, next_state):
-        """
-        基于状态转移更新策略（例如使用Q-learning、Policy Gradient等）
-        """
-        pass
+    def select_action(self, state):
+        # 简单示例：随机动作
+        return np.random.rand(self.action_dim)
 
-# ------------------------------------------------------------------------------
+class RLEnvironment:
+    def __init__(self, ue_list, ap_list):
+        self.ue_list = ue_list
+        self.ap_list = ap_list
+    
+    def get_state(self):
+        # 作为示例，返回随机状态向量
+        return np.random.rand(10)
+    
+    def step(self, action):
+        # 占位，返回下一个状态、奖励和done标记
+        reward = np.random.rand()
+        new_state = self.get_state()
+        done = False
+        return new_state, reward, done

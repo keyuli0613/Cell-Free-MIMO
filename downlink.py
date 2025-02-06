@@ -1,66 +1,137 @@
 # downlink.py
+
 import numpy as np
-from config import ANTENNAS_PER_AP, NOISE_DL, UE_MAX_POWER
+from scipy.linalg import inv
+from config import NOISE_DL, RHO_TOT
 
-def centralized_downlink_precoding(ue_list, ap_list, channel_estimates, power_allocation):
+def compute_downlink_SE(serving_aps, H_hat, H_true, ue_id, all_ues,
+                        lN, p, sigma2, precoding_scheme='MR',
+                        rho_dist=None, D=None):
     """
-    集中式下行预编码
+    计算下行链路的频谱效率 (SE)。
+
+    参数说明:
+      serving_aps:    为当前UE(ue_id)提供服务的AP对象列表
+      H_hat:          (num_AP, lN, num_UE)  下行信道的估计值
+      H_true:         (num_AP, lN, num_UE)  下行信道的真实值
+      ue_id:          当前UE的索引(ID)
+      all_ues:        UE对象的列表
+      lN:             每个AP的天线数
+      p:              发射功率(可选, 如果本地要参考)
+      sigma2:         下行噪声方差, 用于L-MMSE正则等
+      precoding_scheme: 字符串, 'MR' 或 'L-MMSE' 等
+      rho_dist:       (L, K)的功率分配矩阵(可选), 目前未显式使用
+      D:              (L, K) 指示矩阵, D[l, k]==1表示 AP l 服务 UE k
+
     返回:
-      precoding_vectors: {ue_id: collective_precoding_vector (complex 1D array)}
-      x_signals: {ap_id: x_l (shape: (ANTENNAS_PER_AP,))}
+      SE:  浮点数, 表示此UE的下行SE
     """
-    precoding_vectors = {}
-    # 每个UE: 按 AP.id 排序获取服务AP列表, 顺序拼接
-    for ue in ue_list:
-        serving_aps = sorted([ap for ap in ap_list if ap.serves(ue)], key=lambda a: a.id)
-        w_concat = np.array([], dtype=complex)
-        for ap in serving_aps:
-            h_est = channel_estimates[(ue.id, ap.id)]
-            w_concat = np.concatenate((w_concat, h_est))
-        if w_concat.size == 0:
-            w_concat = np.zeros(ANTENNAS_PER_AP, dtype=complex)
-        # 归一化并乘以功率因子
-        power = power_allocation.get(ue.id, UE_MAX_POWER)
-        norm_val = np.linalg.norm(w_concat)
-        if norm_val < 1e-12:
-            # 避免除0
-            precoding_vectors[ue.id] = w_concat
+
+    # 如果没有AP服务,直接SE=0返回
+    if len(serving_aps) == 0:
+        return 0.0
+
+    # 预编码向量字典: {ap_id: w_vec (shape=(lN,)) }
+    W = {}
+
+    for ap in serving_aps:
+        ap_id = ap.id
+
+        # 获取该AP真正服务的UE列表
+        served_ues = [k for k in range(len(all_ues)) if D[ap_id, k] == 1]
+
+        # 若该AP无任何UE可服务(或D里没有1),则给预编码向量 = 0
+        if len(served_ues) == 0:
+            W[ap_id] = np.zeros(lN, dtype=complex)
+            continue
+
+        # 根据 precoding_scheme 不同,构造相应的预编码向量
+        if precoding_scheme == 'MR':
+            # MR 直接使用 H_hat[ap, :, ue_id]
+            W[ap_id] = H_hat[ap_id, :, ue_id]
+
+        elif precoding_scheme == 'L-MMSE':
+            # L-MMSE: 累加外积 (N x N), 再加噪声正则
+            C_tmp = np.zeros((lN, lN), dtype=complex)
+            for k_ue in served_ues:
+                h_vec = H_hat[ap_id, :, k_ue]  # shape = (lN,)
+                C_tmp += np.outer(h_vec, h_vec.conj())
+
+            # 加上噪声+小正则保证可逆
+            eps = 1e-8
+            C_total = C_tmp + sigma2 * np.eye(lN) + eps * np.eye(lN)
+
+            # 尝试求逆; 若仍奇异, fallback用0向量
+            try:
+                w_vec = inv(C_total) @ H_hat[ap_id, :, ue_id]
+            except np.linalg.LinAlgError:
+                w_vec = np.zeros(lN, dtype=complex)
+
+            W[ap_id] = w_vec
+
         else:
-            precoding_vectors[ue.id] = np.sqrt(power) * w_concat / norm_val
+            # 其他预编码方式未实现, fallback=0
+            W[ap_id] = np.zeros(lN, dtype=complex)
 
-    # 计算每个AP的发射信号
-    x_signals = {ap.id: np.zeros(ANTENNAS_PER_AP, dtype=complex) for ap in ap_list}
-    for ue in ue_list:
-        serving_aps = sorted([ap for ap in ap_list if ap.serves(ue)], key=lambda a: a.id)
-        w_collective = precoding_vectors[ue.id]
-        sub_len = ANTENNAS_PER_AP
-        for idx, ap in enumerate(serving_aps):
-            start = idx * sub_len
-            end = (idx + 1) * sub_len
-            w_sub = w_collective[start:end]
-            # 数据符号
-            s = 1 + 0j
-            x_signals[ap.id] += w_sub * s
-    return precoding_vectors, x_signals
+    # ------ 功率归一化(可选) -------
+    total_power = sum(np.linalg.norm(w)**2 for w in W.values())
+    if RHO_TOT > 0 and total_power > RHO_TOT:
+        scale = np.sqrt(RHO_TOT / total_power)
+        for ap_id in W:
+            w = W[ap_id]
+            ap_power = np.linalg.norm(w)**2
+            if ap_power > RHO_TOT:
+                W[ap_id] *= np.sqrt(RHO_TOT / ap_power)
+            # W[ap_id] *= scale
 
-def downlink_signal_model(ue, ap_list, channel_matrix, centralized_precoding):
+    # ============ 计算有效信号 & 干扰 ============
+    signal = 0. + 0j
+    interference = 0.
+
+    for ap in serving_aps:
+        ap_id = ap.id
+        w = W[ap_id]  # 此时不会KeyError
+        h_vec = H_true[ap_id, :, ue_id]
+
+        # 累加信号(复数相加)
+        signal += np.vdot(w, h_vec)  # np.vdot => conj(w)*h
+
+        # 干扰: other_ue!=ue_id
+        for other_ue in all_ues:
+            if other_ue.id == ue_id:
+                continue
+            h_interf = H_true[ap_id, :, other_ue.id]
+            interference += np.abs(np.vdot(w, h_interf))**2
+
+    # 计算SINR
+    noise = sigma2
+    SINR = np.abs(signal)**2 / (interference + noise)
+    SE = np.log2(1 + SINR)
+    return SE
+
+
+def centralized_power_allocation(gain_matrix, D, scheme='uniform'):
     """
-    计算UE的下行接收信号:
-      y = sum_{AP in serving} vdot(h, w_sub)
+    集中式功率分配算法 (L,K) => (L,K)
+    scheme = 'uniform' or 'proportional'
     """
-    y_total = 0+0j
-    serving_aps = sorted([ap for ap in ap_list if ap.serves(ue)], key=lambda a: a.id)
-    w_collective = centralized_precoding[ue.id]
-    sub_len = ANTENNAS_PER_AP
-    for idx, ap in enumerate(serving_aps):
-        h = channel_matrix[(ue.id, ap.id)]
-        start = idx*sub_len
-        end = (idx+1)*sub_len
-        w_sub = w_collective[start:end]
-        s = 1 + 0j
-        y_total += np.vdot(h, w_sub)*s
-    
-    # 加噪声
-    noise = (np.random.randn() + 1j*np.random.randn())/np.sqrt(2)*np.sqrt(NOISE_DL)
-    y_total += noise
-    return y_total
+    L, K = gain_matrix.shape
+    rho = np.zeros((L, K))
+
+    if scheme == 'uniform':
+        # 均匀分配
+        for l in range(L):
+            served_ues = np.where(D[l, :] == 1)[0]
+            n_served = len(served_ues)
+            if n_served > 0:
+                rho[l, served_ues] = RHO_TOT / n_served
+
+    elif scheme == 'proportional':
+        # 按比例, gain/sum(gain)
+        for l in range(L):
+            served_ues = np.where(D[l, :] == 1)[0]
+            total_gain = np.sum(gain_matrix[l, served_ues])
+            if total_gain > 0:
+                rho[l, served_ues] = (RHO_TOT * gain_matrix[l, served_ues] / total_gain)
+
+    return rho

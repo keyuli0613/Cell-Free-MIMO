@@ -1,89 +1,208 @@
-# main.py
-
 import numpy as np
-from config import (NUM_AP, NUM_UE, ANTENNAS_PER_AP, AREA_SIZE,
-                    TAU_P, TAU_D, UE_MAX_POWER, AP_MAX_POWER, NOISE_DL)
-from channel_model import generate_channel
-from pilot_assignment import assign_pilots
+import matplotlib.pyplot as plt
+from config import NUM_AP, NUM_UE, ANTENNAS_PER_AP, TAU_C, TAU_P, AREA_SIZE, UE_MAX_POWER, MC_TRIALS, NOISE_UL, NOISE_DL, RHO_TOT
 from objects import AP, UE
-from uplink import uplink_signal_model
-from downlink import centralized_downlink_precoding, downlink_signal_model
+from pilot_assignment import assign_pilots
+from channel_estimation import mmse_estimate
+from uplink import compute_uplink_SE_advanced
+from scipy.linalg import sqrtm
+from downlink import compute_downlink_SE, centralized_power_allocation
+
+def generate_spatial_correlation(N, angle_spread_deg=10):
+    """生成ULA天线的空间相关矩阵"""
+    angles = np.linspace(-angle_spread_deg/2, angle_spread_deg/2, 100)
+    a = np.array([np.exp(-1j * np.pi * np.sin(np.deg2rad(theta)) * np.arange(N)) for theta in angles])
+    R = a.T @ a.conj() / len(angles)
+    return R
+
+def run_simulation(mc_trials=MC_TRIALS):
+    uplink_SE_all = []
+    
+    for trial in range(mc_trials):
+        # 1) 初始化AP和UE（带三维坐标）
+        ap_list = [AP(ap_id=l, 
+                     position=[np.random.uniform(0, AREA_SIZE), 
+                               np.random.uniform(0, AREA_SIZE), 10],  # AP高度10m
+                     antennas=ANTENNAS_PER_AP) 
+                  for l in range(NUM_AP)]
+        
+        ue_list = [UE(ue_id=k, 
+                     position=[np.random.uniform(0, AREA_SIZE), 
+                               np.random.uniform(0, AREA_SIZE), 1.5])  # UE高度1.5m
+                  for k in range(NUM_UE)]
+        
+        # 2) 计算大尺度衰落系数beta
+        beta_matrix = np.zeros((NUM_AP, NUM_UE))
+        for l, ap in enumerate(ap_list):
+            for k, ue in enumerate(ue_list):
+                distance = np.linalg.norm(np.array(ap.position) - np.array(ue.position))
+                path_loss = 10**(- (128.1 + 37.6 * np.log10(distance/1000)) / 10 )  # 3GPP UMa模型
+                shadowing = 10**(np.random.normal(0, 8)/10)  # 8dB阴影
+                beta_matrix[l, k] = path_loss * shadowing
+        
+        # 3) 生成空间相关矩阵R (N,N,L,K)
+        R = np.zeros((ANTENNAS_PER_AP, ANTENNAS_PER_AP, NUM_AP, NUM_UE), dtype=complex)
+        for l in range(NUM_AP):
+            for k in range(NUM_UE):
+                R[:,:,l,k] = beta_matrix[l,k] * generate_spatial_correlation(ANTENNAS_PER_AP)
+        
+        # 4) 生成真实信道 H_true
+        H_true = np.zeros((NUM_AP, ANTENNAS_PER_AP, NUM_UE), dtype=complex)
+        for l in range(NUM_AP):
+            for k in range(NUM_UE):
+                Rsqrt = sqrtm(R[:,:,l,k])
+                H_true[l,:,k] = Rsqrt @ (np.random.randn(ANTENNAS_PER_AP) + 1j*np.random.randn(ANTENNAS_PER_AP))/np.sqrt(2)
+        
+        # 5) 导频分配与DCC
+        pilot_assignments, dcc = assign_pilots(ue_list, ap_list, beta_matrix)
+        for ue in ue_list:
+            ue.assigned_ap_ids = dcc[ue.id]
+        
+        D = np.zeros((NUM_AP, NUM_UE), dtype=int)
+        for ue in ue_list:
+            for ap_id in ue.assigned_ap_ids:
+                D[ap_id, ue.id] = 1
+        
+        # 6) MMSE信道估计
+        H_hat = mmse_estimate(ap_list, ue_list, H_true, pilot_assignments, UE_MAX_POWER, NOISE_UL)
+        
+        # 7) 计算上行SE
+        se_list = []
+        for ue in ue_list:
+            serving_aps = [ap for ap in ap_list if ap.id in ue.assigned_ap_ids]
+            if not serving_aps:
+                se_list.append(0.0)
+                continue
+            
+            se_val = compute_uplink_SE_advanced(
+                serving_aps=serving_aps,
+                H_hat=H_hat,
+                H_true=H_true,
+                ue_id=ue.id,
+                all_ues=ue_list,
+                lN=ANTENNAS_PER_AP,
+                p=UE_MAX_POWER,
+                sigma2=NOISE_UL,
+                tau_c=TAU_C,
+                tau_p=TAU_P
+            )
+            se_list.append(se_val)
+        
+        uplink_SE_all.append(np.mean(se_list))
+    
+        downlink_SE = {
+        'MR': [],
+        'L-MMSE': [],
+        'P-MMSE': []
+        }
+
+        # 功率分配矩阵
+        gain_matrix = np.zeros((NUM_AP, NUM_UE))
+        for l in range(NUM_AP):
+            for k in range(NUM_UE):
+                gain_matrix[l,k] = np.real(np.trace(R[:,:,l,k]))
+    
+        # 集中式功率分配
+        rho_central = centralized_power_allocation(gain_matrix, D, scheme='proportional')
+    
+        # 分布式功率分配
+        # rho_dist = np.zeros((NUM_AP, NUM_UE))
+        # for l in range(NUM_AP):
+        #     served_ues = np.where(D[l,:] == 1)[0]
+        #     rho_dist[l, served_ues] = RHO_TOT / len(served_ues)
+
+        rho_dist = np.zeros((NUM_AP, NUM_UE))
+        for l in range(NUM_AP):
+            served_ues = np.where(D[l, :] == 1)[0]
+            num_served = len(served_ues)
+        
+            if num_served > 0:
+                rho_dist[l, served_ues] = RHO_TOT / num_served
+            # else:
+            #     print(f"Trial {trial}: AP {l} has no served UEs.")
+
+        # for trial in range(mc_trials):
+        # ... 原有信道生成代码 ...
+        
+        # 下行SE计算
+            for scheme in ['MR', 'L-MMSE']:
+                se_list = []
+                for ue in ue_list:
+                    serving_aps = [ap for ap in ap_list if ap.id in ue.assigned_ap_ids]
+                    if not serving_aps:
+                        se_list.append(0.0)
+                        continue
+                
+                    se_val = compute_downlink_SE(
+                        serving_aps=serving_aps,
+                        H_hat=H_hat,
+                        H_true=H_true,
+                        ue_id=ue.id,
+                        all_ues=ue_list,
+                        lN=ANTENNAS_PER_AP,
+                        p=UE_MAX_POWER,
+                        sigma2=NOISE_DL,
+                        precoding_scheme=scheme,
+                        rho_dist=rho_dist,
+                        D=D  # 新增参数
+                        )
+
+                    # print(f"[DEBUG] scheme={scheme}, UE {ue.id}: SE = {se_val:.4f}")
+                    se_list.append(se_val)
+            
+                    downlink_SE[scheme].append(np.mean(se_list))
+
+    return uplink_SE_all, downlink_SE
+    
+
+def plot_cdf(data, title, xlabel):
+    data = np.array(data)
+    sorted_data = np.sort(data)
+    cdf = np.arange(1, len(sorted_data)+1)/len(sorted_data)
+    plt.figure()
+    plt.plot(sorted_data, cdf, marker='.', linestyle='none')
+    plt.xlabel(xlabel)
+    plt.ylabel("CDF")
+    plt.title(title)
+    plt.grid(True)
+    plt.show()
+
+def plot_cdf_dict(schemes_dict, title, xlabel):
+    """
+    schemes_dict: 一个字典, 比如 {'MR': [...], 'L-MMSE': [...] } 
+                  每个key对应一条CDF要画的数据列表
+    """
+    import matplotlib.pyplot as plt
+
+    plt.figure()
+    for scheme_name, se_list in schemes_dict.items():
+        # se_list应是一维列表
+        arr = np.sort(se_list)
+        cdf = np.arange(1, len(arr)+1) / len(arr)
+        plt.plot(arr, cdf, label=scheme_name)
+
+    plt.xlabel(xlabel)
+    plt.ylabel("CDF")
+    plt.title(title)
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
 
 def main():
-    # 1. 初始化AP和UE对象
-    ap_list = []
-    ue_list = []
+    # 运行仿真
+    uplink_SE, downlink_SE = run_simulation(mc_trials=50)
     
-    # 在[0, AREA_SIZE]×[0, AREA_SIZE]平面随机分布AP，AP高度为10m
-    for ap_id in range(NUM_AP):
-        ap_pos = [np.random.uniform(0, AREA_SIZE),
-                  np.random.uniform(0, AREA_SIZE),
-                  10.0]
-        ap_list.append(AP(ap_id, ap_pos, ANTENNAS_PER_AP))
+    # 上行结果（单组数据）
+    print("Avg Uplink SE:", np.mean(uplink_SE))
     
-    # 同理，为UE随机生成位置，高度1.5m
-    for ue_id in range(NUM_UE):
-        ue_pos = [np.random.uniform(0, AREA_SIZE),
-                  np.random.uniform(0, AREA_SIZE),
-                  1.5]
-        ue_list.append(UE(ue_id, ue_pos))
-    
-    # 2. 生成(UE, AP)信道矩阵: channel_matrix[(ue.id, ap.id)] = complex vector
-    channel_matrix = {}
-    for ue in ue_list:
-        for ap in ap_list:
-            channel_matrix[(ue.id, ap.id)] = generate_channel(ap.position, ue.position)
-    
-    # 3. 导频分配 + 合作聚类
-    pilot_assignments, dcc = assign_pilots(ue_list, ap_list)
-    # 将 dcc 结果写回 ue.assigned_ap_ids
-    for ue in ue_list:
-        ue.assigned_ap_ids = dcc[ue.id]
-    
-    # 打印导频分配结果
-    print("Pilot assignments:")
-    for ue in ue_list:
-        p_idx = pilot_assignments[ue.id]
-        print(f"UE {ue.id} pilot {p_idx}, served by APs: {ue.assigned_ap_ids}")
-    
-    # 4. 信道估计(此处直接把真实信道当作估计)
-    channel_estimates = channel_matrix.copy()
-    
-    # 5. 上行测试: 构造上行接收信号
-    uplink_signals = uplink_signal_model(ue_list, ap_list, channel_matrix)
-    print("\n[Uplink] Sample signal at AP 0:\n", uplink_signals[0])
-    
-    # 6. 下行测试: 调用集中式下行预编码 + 下行接收信号
-    #   假设所有UE的下行功率统一为 UE_MAX_POWER
-    power_allocation = {ue.id: UE_MAX_POWER for ue in ue_list}
-    
-    # 调用 centralized_downlink_precoding 生成预编码向量 & x_signals
-    from downlink import centralized_downlink_precoding, downlink_signal_model
-    precoding_vectors, x_signals = centralized_downlink_precoding(
-        ue_list, ap_list, channel_estimates, power_allocation
-    )
-    
-    # 打印下行发射信号示例
-    print("\n[Downlink] Sample x_signals at AP 0:\n", x_signals[0])
-    
-    # 逐个UE计算下行接收信号
-    print("\n[Downlink] Received signals:")
-    for ue in ue_list:
-        y_dl = downlink_signal_model(ue, ap_list, channel_matrix, precoding_vectors)
-        print(f"UE {ue.id} downlink received signal = {y_dl}")
-    
-    # 7. RL模块占位
-    from reinforcement_learning import RLAgent
-    state_dim = 10
-    action_dim = 5
-    rl_agent = RLAgent(state_dim, action_dim)
-    
-    # 示例
-    state = np.random.rand(state_dim)
-    action = rl_agent.select_action(state)
-    print("\nRL Agent selected action:", action)
-    
-    print("\nDone.")
+    # plot_cdf({"Uplink": uplink_SE}, "Uplink SE CDF", "SE (bit/s/Hz)")
+    plot_cdf(uplink_SE, "Uplink SE CDF", "SE (bit/s/Hz)")
 
-if __name__ == '__main__':
+    # 下行结果（多组数据对比）
+    # plot_cdf(downlink_SE, "Downlink SE CDF", "SE (bit/s/Hz)")
+    plot_cdf_dict(downlink_SE, "Downlink SE CDF", "SE (bit/s/Hz)")
+
+if __name__ == "__main__":
     main()

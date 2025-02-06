@@ -1,42 +1,109 @@
-# Cell-Free-MIMO
-整体项目结构
-建议将项目分为以下几个主要模块或包：
+# Cell-Free Massive MIMO 仿真平台
 
-1.系统参数与模型配置
-包含网络布局、AP/UE数量、天线数、相干块长度、导频长度、功率预算等基本参数；
-同时定义信道模型参数（如路径损耗、阴影衰落、空间相关矩阵参数等）。
 
-2.信道模型 (Channel Model)
-实现随机信道生成函数，包括：
+基于《Foundations of User-Centric Cell-Free Massive MIMO》实现的分布式大规模 MIMO 系统仿真平台，支持 **上下行链路频谱效率分析、动态协作聚类（DCC）、多种预编码方案**。
 
-路径损耗模型（例如根据书中公式 (1.1) 或 (2.16)）；
-小尺度衰落（例如独立或相关瑞利衰落）；
-空间相关性建模（例如基于局部散射模型，利用 ASDs 参数）。
+---
 
-3.导频与信道估计 (Pilot & Channel Estimation)
-实现导频生成、正交导频序列分配（见算法 4.1）；
-实现 MMSE 信道估计函数，输入为接收导频信号，输出为信道估计和误差协方差。
+## 📂 代码框架
 
-4.合作聚类与 Pilot Assignment (DCC & Pilot Assignment)
-根据书中算法 4.1，为每个 UE 分配合适的导频，并形成动态合作聚类（DCC）。
+```bash
+Cell-Free-MIMO/
+├── main.py              # 主仿真循环
+├── config.py            # 系统参数配置
+├── objects.py           # AP/UE 类定义
+├── channel_estimation.py# MMSE
+├── pilot_assignment.py  # 导频分配与动态协作聚类（DCC）
+├── uplink.py            # 上行链路 SE 计算（含 MMSE/MR 合并）
+├── downlink.py          # 下行链路预编码与 SE 计算
+├── utils/               # 辅助工具
+│   ├── visualization.py  # CDF 绘图模块
+│   └── power_allocation.py  # 功率分配算法
+└── README.md
+```
 
-5.上行操作 (Uplink Operation)
-包含集中式和分布式两种方案的实现，主要内容包括：
-接收合并向量计算（如 MMSE、P-MMSE、MR 等）；
-上行信号模型与 SE 计算（参考公式 (5.1)-(5.5)）。
+---
 
-6.下行操作 (Downlink Operation)
-分为集中式和分布式两种下行预编码实现，涵盖：
-集中式预编码（基于全局信道估计、MMSE 预编码、P-MMSE、P-RZF 等）；
-分布式预编码（本地预编码设计，如 MR、LP-MMSE 等）；
-对应的 SE 下界计算（如公式 (6.9) 与 (6.21)）。
+## 🛠️ 实现算法
 
-7.前传负载统计 (Fronthaul Signaling)
-根据集中式与分布式的前传负载公式，统计在不同场景下所需的复数标量数量。
+### **1. 信道建模（式 2.25）**
 
-8.性能评估与数值仿真 (Performance Evaluation)
-通过 Monte Carlo 仿真，生成大量相干块，计算上行/下行的 SE 分布、CDF 等指标；
-对比不同预编码方案、集中式与分布式操作下的性能表现。
+$$
+R = \frac{1}{N_a} \sum_{i=1}^{N_a} a(\phi_i) a(\phi_i)^H
+$$
 
-9.强化学习模块 (Reinforcement Learning for QoS & Energy)
-预留接口和数据接口，用于后续结合系统运行数据（例如不同聚类、weekday、时间、延时敏感/宽松等）来设计基于 RL 的资源（功率）和 QoS 优化算法。
+```python
+import numpy as np
+
+def generate_spatial_correlation(N, angle_spread=10):
+    angles = np.linspace(-angle_spread/2, angle_spread/2, 100)
+    a = [np.exp(-1j*np.pi*np.sin(np.deg2rad(theta))*np.arange(N)) for theta in angles]
+    R = (np.array(a).T @ np.conj(a)) / len(angles)  # 式(2.25)
+    return R
+```
+
+---
+
+### **2. MMSE 信道估计（式 4.5）**
+
+\( \hat{h}_{mk} = \tau_p \rho_p R_{mk} \left(\tau_p \rho_p \sum_{i \in P_k} R_{mi} + \sigma^2 I\right)^{-1} y_{mp} \)
+
+
+
+```python
+Hhat = np.sqrt(p) * R @ np.linalg.inv(p * tau_p * sum_R + sigma2 * np.eye(N)) @ Y_pilot
+```
+
+---
+
+### **3. 上行频谱效率计算（式 5.5）**
+
+$$
+SE_k^{ul} = \frac{\tau_c - \tau_p}{\tau_c} \log_2 \left(1 + \frac{\rho_u \left| \sum\limits_{m \in M_k} v_{mk}^H h_{mk} \right|^2}{\rho_u \sum\limits_{i \neq k} \left| \sum\limits_{m \in M_k} v_{mk}^H h_{mi} \right|^2 + \sigma^2 \sum\limits_{m \in M_k} \| v_{mk} \|^2} \right)
+$$
+
+```python
+SINR = np.abs(np.sum(v_mk.conj().T @ h_mk))**2 / (np.sum(np.abs(np.sum(v_mk.conj().T @ h_mi))**2) + noise)
+SE = (tau_c - tau_p) / tau_c * np.log2(1 + SINR)
+```
+
+---
+
+### **4. 下行预编码（式 6.25 / 6.33）**
+
+<p>
+$$
+w_{mk}^{\text{L-MMSE}} = \rho_d \left(\sum\limits_{i \in K_m} \hat{h}_{mi} \hat{h}_{mi}^H + \sigma^2 I \right)^{-1} \hat{h}_{mk}
+$$
+<p>
+  
+```python
+# L-MMSE 预编码计算
+C_total = sum(h_hat @ h_hat.conj().T for UE in served_UEs) + sigma2 * np.eye(N)
+w = np.linalg.inv(C_total) @ h_hat_k  # 式(6.25)
+```
+
+---
+
+## 📈 仿真结果示例
+
+### **1. 上行链路 SE CDF**
+![Uplink SE CDF](./Uplink%20SE%20CDF.png)
+
+### **2. 下行链路 SE CDF**
+![Downlink SE CDF](./Downlink%20SE%20CDF.png)
+
+---
+
+## 🚀 未来优化方向
+
+强化学习模块 (Reinforcement Learning for QoS & Energy)，用于后续结合系统运行数据（例如不同聚类、weekday、时间、延时敏感/宽松等）来设计基于 RL 的资源（功率）和 QoS 优化算法。
+
+---
+
+## 📢 参考文献
+
+1. **[Foundations of User-Centric Cell-Free Massive MIMO](https://www.cell-free.net/book/)**
+2. **Marzetta, T. L., et al., "Fundamentals of Massive MIMO"**
+3. **Björnson, E., et al., "Massive MIMO Networks: Spectral, Energy, and Hardware Efficiency"**
+

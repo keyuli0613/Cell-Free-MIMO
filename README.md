@@ -46,7 +46,12 @@ def generate_spatial_correlation(N, angle_spread=10):
 
 ### **2. MMSE 信道估计（式 4.5）**
 
-\( \hat{h}_{mk} = \tau_p \rho_p R_{mk} \left(\tau_p \rho_p \sum_{i \in P_k} R_{mi} + \sigma^2 I\right)^{-1} y_{mp} \)
+<p>
+$$
+\hat{h}_{mk} = \tau_p \rho_p R_{mk} \left(\tau_p \rho_p \sum_{i \in P_k} R_{mi} + \sigma^2 I\right)^{-1} y_{mp}
+$$
+</p>
+
 
 
 

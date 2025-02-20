@@ -1,5 +1,6 @@
 # channel_estimation.py
 import numpy as np
+from config import ESTIMATION_ERROR_VAR
 
 def mmse_estimate(ap_list, ue_list, H_true, pilot_assignments, p, sigma2):
     """基于接收导频信号的MMSE估计"""
@@ -30,6 +31,10 @@ def mmse_estimate(ap_list, ue_list, H_true, pilot_assignments, p, sigma2):
             Psi = p * tau_p * np.sum([H_true[l,:,i] @ H_true[l,:,i].conj().T for i in range(num_UEs) if pilot_assignments[i]==t], axis=0) + sigma2 * np.eye(N)
             H_hat[l,:,k] = np.sqrt(p) * H_true[l,:,k] @ np.linalg.inv(Psi) @ Y_pilot[l,:,t]
             
+    # 添加估计误差（式4.7）
+    error_shape = H_hat.shape
+    estimation_error = np.sqrt(ESTIMATION_ERROR_VAR/2) * (
+        np.random.randn(*error_shape) + 1j*np.random.randn(*error_shape)
+    )
 
-
-    return H_hat
+    return H_hat + estimation_error

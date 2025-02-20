@@ -2,136 +2,139 @@
 
 import numpy as np
 from scipy.linalg import inv
-from config import NOISE_DL, RHO_TOT
+from config import NOISE_DL, RHO_TOT_PER_AP
 
 def compute_downlink_SE(serving_aps, H_hat, H_true, ue_id, all_ues,
                         lN, p, sigma2, precoding_scheme='MR',
-                        rho_dist=None, D=None):
+                        rho_dist=None, D=None, pilot_assignments=None, all_aps_global=None):
     """
-    计算下行链路的频谱效率 (SE)。
-
-    参数说明:
-      serving_aps:    为当前UE(ue_id)提供服务的AP对象列表
-      H_hat:          (num_AP, lN, num_UE)  下行信道的估计值
-      H_true:         (num_AP, lN, num_UE)  下行信道的真实值
-      ue_id:          当前UE的索引(ID)
-      all_ues:        UE对象的列表
-      lN:             每个AP的天线数
-      p:              发射功率(可选, 如果本地要参考)
-      sigma2:         下行噪声方差, 用于L-MMSE正则等
-      precoding_scheme: 字符串, 'MR' 或 'L-MMSE' 等
-      rho_dist:       (L, K)的功率分配矩阵(可选), 目前未显式使用
-      D:              (L, K) 指示矩阵, D[l, k]==1表示 AP l 服务 UE k
-
-    返回:
-      SE:  浮点数, 表示此UE的下行SE
+    计算下行链路频谱效率（SE）。
+    预编码方案包括 MR 和 L-MMSE。
+    
+    输入参数：
+      serving_aps: 为目标 UE 提供服务的 AP 列表
+      H_hat: 信道估计矩阵，形状 (NUM_AP, lN, NUM_UE)
+      H_true: 真实信道矩阵，形状 (NUM_AP, lN, NUM_UE)
+      ue_id: 目标 UE 的 id（整数）
+      all_ues: 所有 UE 对象列表
+      lN: 每个 AP 的天线数
+      p: 发射功率（用于预编码计算）
+      sigma2: 噪声功率（NOISE_DL）
+      precoding_scheme: 预编码方案，'MR' 或 'L-MMSE'
+      rho_dist: 下行功率分配矩阵，形状 (NUM_AP, NUM_UE)
+      D: 服务矩阵 (NUM_AP, NUM_UE)，D[l,k]==1 表示 AP l 服务 UE k
+      pilot_assignments: 可选，用于 L-MMSE 预编码（如果存在）
+      all_aps_global: 如果提供，则用于干扰计算（遍历全局 AP）
+      
+    输出：
+      SE: 下行频谱效率，单位 bit/s/Hz
     """
-
-    # 如果没有AP服务,直接SE=0返回
     if len(serving_aps) == 0:
         return 0.0
 
-    # 预编码向量字典: {ap_id: w_vec (shape=(lN,)) }
+    # 对于干扰计算，如果提供全局AP列表，则使用全局AP，否则仅使用 serving_aps
+    if all_aps_global is not None:
+        all_aps_for_interference = all_aps_global
+    else:
+        all_aps_for_interference = serving_aps
+
+    # 预编码向量字典
     W = {}
 
     for ap in serving_aps:
         ap_id = ap.id
-
-        # 获取该AP真正服务的UE列表
-        served_ues = [k for k in range(len(all_ues)) if D[ap_id, k] == 1]
-
-        # 若该AP无任何UE可服务(或D里没有1),则给预编码向量 = 0
+        # 得到该 AP 服务的 UE 列表
+        served_ues = np.where(D[ap_id, :] == 1)[0]
         if len(served_ues) == 0:
             W[ap_id] = np.zeros(lN, dtype=complex)
             continue
 
-        # 根据 precoding_scheme 不同,构造相应的预编码向量
         if precoding_scheme == 'MR':
-            # MR 直接使用 H_hat[ap, :, ue_id]
-            W[ap_id] = H_hat[ap_id, :, ue_id]
+            # MR预编码：直接取目标 UE 的信道估计，乘以功率分配的平方根
+            w = H_hat[ap_id, :, ue_id] * np.sqrt(rho_dist[ap_id, ue_id])
+            W[ap_id] = w
 
         elif precoding_scheme == 'L-MMSE':
-            # L-MMSE: 累加外积 (N x N), 再加噪声正则
-            C_tmp = np.zeros((lN, lN), dtype=complex)
-            for k_ue in served_ues:
-                h_vec = H_hat[ap_id, :, k_ue]  # shape = (lN,)
-                C_tmp += np.outer(h_vec, h_vec.conj())
+            # L-MMSE预编码：构造局部协方差矩阵，但排除目标UE自身
+            interfering_ues = [k for k in served_ues if k != ue_id]
+            if interfering_ues:
+                C_tmp = sum(
+                    np.outer(H_hat[ap_id, :, k], H_hat[ap_id, :, k].conj())
+                    for k in interfering_ues
+                )
+            else:
+                # 若无其他UE，则C_tmp为零矩阵
+                C_tmp = np.zeros((lN, lN), dtype=complex)
+            # 计算矩阵迹并设置正则化参数（调低正则化强度）
+            trace_C = np.trace(C_tmp) / lN if np.trace(C_tmp) > 0 else 1e-3
+            eps = 1e-4 * trace_C  # 调低正则化参数
+            C_total = C_tmp + (sigma2 + eps) * np.eye(lN)
 
-            # 加上噪声+小正则保证可逆
-            eps = 1e-8
-            C_total = C_tmp + sigma2 * np.eye(lN) + eps * np.eye(lN)
-
-            # 尝试求逆; 若仍奇异, fallback用0向量
             try:
-                w_vec = inv(C_total) @ H_hat[ap_id, :, ue_id]
-            except np.linalg.LinAlgError:
-                w_vec = np.zeros(lN, dtype=complex)
-
-            W[ap_id] = w_vec
+                # 计算 L-MMSE 预编码向量（公式式(6.25)）
+                w = inv(C_total) @ H_hat[ap_id, :, ue_id]
+                # 乘以功率分配平方根
+                w *= np.sqrt(rho_dist[ap_id, ue_id])
+            except np.linalg.LinAlgError as e:
+                print(f"AP {ap_id} 求逆失败: {str(e)}")
+                w = np.zeros(lN, dtype=complex)
+            W[ap_id] = w
 
         else:
-            # 其他预编码方式未实现, fallback=0
+            # 默认：零向量
             W[ap_id] = np.zeros(lN, dtype=complex)
 
-    # ------ 功率归一化(可选) -------
-    total_power = sum(np.linalg.norm(w)**2 for w in W.values())
-    if RHO_TOT > 0 and total_power > RHO_TOT:
-        scale = np.sqrt(RHO_TOT / total_power)
-        for ap_id in W:
-            w = W[ap_id]
-            ap_power = np.linalg.norm(w)**2
-            if ap_power > RHO_TOT:
-                W[ap_id] *= np.sqrt(RHO_TOT / ap_power)
-            # W[ap_id] *= scale
+        # 每个AP独立归一化，确保其发射功率不超过 RHO_TOT_PER_AP
+        ap_power = np.linalg.norm(W[ap_id])**2
+        if ap_power > RHO_TOT_PER_AP:
+            scaling_factor = np.sqrt(RHO_TOT_PER_AP / ap_power)
+            W[ap_id] = W[ap_id] * scaling_factor
 
-    # ============ 计算有效信号 & 干扰 ============
-    signal = 0. + 0j
-    interference = 0.
+    # ===== 信号与干扰计算 =====
+    signal = 0j
+    interference = 0.0
 
+    # 信号项：仅服务AP贡献目标UE的信号
     for ap in serving_aps:
         ap_id = ap.id
-        w = W[ap_id]  # 此时不会KeyError
-        h_vec = H_true[ap_id, :, ue_id]
+        w = W.get(ap_id, np.zeros(lN, dtype=complex))
+        h_target = H_true[ap_id, :, ue_id]
+        signal += np.vdot(w, h_target)
 
-        # 累加信号(复数相加)
-        signal += np.vdot(w, h_vec)  # np.vdot => conj(w)*h
-
-        # 干扰: other_ue!=ue_id
+    # 干扰项：遍历所有AP（全局），累加对非目标UE的干扰贡献
+    for ap in all_aps_for_interference:
+        ap_id = ap.id
+        w = W.get(ap_id, np.zeros(lN, dtype=complex))
         for other_ue in all_ues:
             if other_ue.id == ue_id:
                 continue
             h_interf = H_true[ap_id, :, other_ue.id]
             interference += np.abs(np.vdot(w, h_interf))**2
 
-    # 计算SINR
-    noise = sigma2
-    SINR = np.abs(signal)**2 / (interference + noise)
+    # 计算有效SINR（包含噪声）
+    SINR = np.abs(signal)**2 / (interference + sigma2)
     SE = np.log2(1 + SINR)
     return SE
 
-
-def centralized_power_allocation(gain_matrix, D, scheme='uniform'):
+def power_allocation(gain_matrix, D, rho_tot):
     """
-    集中式功率分配算法 (L,K) => (L,K)
-    scheme = 'uniform' or 'proportional'
+    按式(6.36)实现功率分配：采用平方根加权分配方法
+    输入：
+      gain_matrix: (L, K) 大尺度衰落系数矩阵（例如使用 trace(R) 作为 beta）
+      D: (L, K) 服务矩阵（若 D[l, k]==1 表示 AP l 服务 UE k）
+      rho_tot: 每个 AP 的总下行功率约束（RHO_TOT_PER_AP）
+    输出：
+      rho: (L, K) 功率分配矩阵
     """
     L, K = gain_matrix.shape
     rho = np.zeros((L, K))
-
-    if scheme == 'uniform':
-        # 均匀分配
-        for l in range(L):
-            served_ues = np.where(D[l, :] == 1)[0]
-            n_served = len(served_ues)
-            if n_served > 0:
-                rho[l, served_ues] = RHO_TOT / n_served
-
-    elif scheme == 'proportional':
-        # 按比例, gain/sum(gain)
-        for l in range(L):
-            served_ues = np.where(D[l, :] == 1)[0]
-            total_gain = np.sum(gain_matrix[l, served_ues])
-            if total_gain > 0:
-                rho[l, served_ues] = (RHO_TOT * gain_matrix[l, served_ues] / total_gain)
-
+    for l in range(L):
+        served_ues = np.where(D[l, :] == 1)[0]
+        if len(served_ues) == 0:
+            continue
+        # 防止除零错误
+        sqrt_gain = np.sqrt(np.maximum(gain_matrix[l, served_ues], 1e-10))
+        total = np.sum(sqrt_gain)
+        if total > 0:
+            rho[l, served_ues] = rho_tot * sqrt_gain / total
     return rho

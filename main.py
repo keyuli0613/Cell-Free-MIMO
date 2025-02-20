@@ -5,7 +5,7 @@ from objects import AP, UE
 from pilot_assignment import assign_pilots
 from channel_estimation import mmse_estimate
 from uplink import compute_uplink_SE_advanced
-from downlink import compute_downlink_SE, centralized_power_allocation
+from downlink import compute_downlink_SE, power_allocation
 from scipy.linalg import sqrtm
 
 def generate_spatial_correlation(N, angle_spread_deg=10):
@@ -116,33 +116,27 @@ def run_simulation(mc_trials=MC_TRIALS):
         uplink_SE_all.append(avg_uplink_SE)
         
         # -------------------------------
-        # 8) 下行 SE 计算：利用同一 H_hat 进行下行预编码，并计算 SE
-        # 这里考虑不同预编码方案：MR、L-MMSE、P-MMSE（如有实现）
-        # -------------------------------
-        # 首先构造功率分配矩阵（集中式和分布式各自计算）
+        
+        # 在run_simulation函数中修改以下部分
+
+        # 8) 下行 SE 计算
         gain_matrix = np.zeros((NUM_AP, NUM_UE))
         for l in range(NUM_AP):
             for k in range(NUM_UE):
-                gain_matrix[l, k] = np.real(np.trace(R[:, :, l, k]))
-                
-        rho_central = centralized_power_allocation(gain_matrix, D, scheme='proportional')
-        
-        # 分布式功率分配：对每个AP，将总功率 RHO_TOT 均分给服务该AP的 UE
-        rho_dist = np.zeros((NUM_AP, NUM_UE))
-        for l in range(NUM_AP):
-            served_ues = np.where(D[l, :] == 1)[0]
-            num_served = len(served_ues)
-            if num_served > 0:
-                rho_dist[l, served_ues] = RHO_TOT / num_served
-        
-        # 对于每个预编码方案计算下行 SE（所有UE）
-        for scheme in ['MR', 'L-MMSE', 'P-MMSE']:
+                gain_matrix[l, k] = np.real(np.trace(R[:,:,l,k]))  # 使用大尺度衰落系数
+
+        # 使用新的平方根加权功率分配
+        # rho_dist = centralized_power_allocation(gain_matrix, D, scheme='proportional')
+        rho_dist = power_allocation(gain_matrix, D, RHO_TOT)
+
+        for scheme in ['MR', 'L-MMSE']:
             se_list_downlink = []
             for ue in ue_list:
                 serving_aps = [ap for ap in ap_list if ap.id in ue.assigned_ap_ids]
                 if not serving_aps:
                     se_list_downlink.append(0.0)
                     continue
+        
                 se_val = compute_downlink_SE(
                     serving_aps=serving_aps,
                     H_hat=H_hat,
@@ -153,14 +147,14 @@ def run_simulation(mc_trials=MC_TRIALS):
                     p=UE_MAX_POWER,
                     sigma2=NOISE_DL,
                     precoding_scheme=scheme,
-                    rho_dist=rho_dist,
-                    D=D
+                    rho_dist=rho_dist,  # 使用新分配的功率
+                    D=D,
+                    pilot_assignments=pilot_assignments
                 )
                 se_list_downlink.append(se_val)
-            avg_downlink_SE = np.mean(se_list_downlink)
-            downlink_SE_all[scheme].append(avg_downlink_SE)
+    
+            downlink_SE_all[scheme].append(np.mean(se_list_downlink))
         
-        # 在每个 trial 内，上下行 SE 都基于同一 H_hat（TDD互易性）
     
     return uplink_SE_all, downlink_SE_all
 

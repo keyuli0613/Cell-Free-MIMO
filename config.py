@@ -40,3 +40,10 @@ BANDWIDTH = 10e6        # 10 MHz
 # 其他参数可根据需要扩展...
 MC_TRIALS = 100
 RHO_TOT = 1
+
+# 下行参数
+RHO_TOT_PER_AP = 1.0  # 每个AP的最大发射功率 (瓦特)
+NOISE_DL = 1e-9       # 下行噪声功率 (瓦特)
+
+# 信道估计参数
+ESTIMATION_ERROR_VAR = 0.1  # 信道估计误差方差（0.1表示10%误差）

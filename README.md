@@ -98,12 +98,14 @@ SE = (tau_c - tau_p) / tau_c * np.log2(1 + SINR)
 
 #### **MR 预编码（6.26）**
 直接使用目标 UE 的信道估计向量：
+
 $$
 \mathbf{w}_{mk}^{MR} = D_{kl} \hat{h}_{kl}
 $$
 
 #### **L-MMSE 预编码（6.25）**
 计算局部协方差矩阵时排除目标 UE 的贡献（即只考虑其他服务 UE 的信道），并加上噪声项和一个正则化项（eps 与协方差矩阵迹有关），再求逆与目标 UE 的信道估计相乘。
+
 $$
 \mathbf{w}_{mk}^{L-MMSE} = \rho_k \left( \sum_{i \in K_m} \rho_i \hat{h}_{mi} \hat{h}_{mi}^{H} + C_{il}^2 + \sigma_{ul}^2 \mathbf{I}_N \right)^{-1} D_{kl} \hat{h}_{kl}
 $$

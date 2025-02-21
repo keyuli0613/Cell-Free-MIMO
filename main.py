@@ -129,7 +129,7 @@ def run_simulation(mc_trials=MC_TRIALS):
         # rho_dist = centralized_power_allocation(gain_matrix, D, scheme='proportional')
         rho_dist = power_allocation(gain_matrix, D, RHO_TOT)
 
-        for scheme in ['MR', 'L-MMSE']:
+        for scheme in ['MR', 'L-MMSE', 'P-MMSE']:
             se_list_downlink = []
             for ue in ue_list:
                 serving_aps = [ap for ap in ap_list if ap.id in ue.assigned_ap_ids]

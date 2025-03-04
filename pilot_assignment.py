@@ -1,7 +1,7 @@
 # pilot_assignment.py
 import numpy as np
 
-def assign_pilots(ue_list, ap_list, beta_matrix, L=5, tau_p=None):
+def assign_pilots(ue_list, ap_list, beta_matrix, L=3, tau_p=None):
     """
     基于大尺度衰落选择前 L 个最强 AP，并为 UE 分配导频，
     同时形成动态合作聚类 (DCC)。

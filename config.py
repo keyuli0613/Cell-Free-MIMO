@@ -4,7 +4,7 @@ import numpy as np
 
 # 网络参数
 NUM_AP = 15          # AP 数量
-NUM_UE = 100            # UE 数量
+NUM_UE = 10            # UE 数量
 ANTENNAS_PER_AP = 4    # 每个AP的天线数
 
 # 相干块参数

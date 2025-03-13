@@ -161,7 +161,7 @@ def compute_downlink_SE(serving_aps, H_hat, H_true, ue_id, all_ues,
 
     # 累计能耗：所有 AP 的预编码向量能量之和
     for ap in serving_aps:
-        ap_id = ap.id
+        ap_id = ap.id      
         total_energy += np.linalg.norm(W.get(ap_id, np.zeros(lN, dtype=complex)))**2
 
     SINR = np.abs(signal)**2 / (interference + sigma2)

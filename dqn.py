@@ -172,4 +172,4 @@ def train_dqn(num_episodes=100, batch_size=128, target_update=50):
     plt.show()
 
 if __name__ == "__main__":
-    train_dqn(num_episodes=100)
+    train_dqn(num_episodes=200)

@@ -158,56 +158,54 @@ Step 2: 形成 DCC（Dynamic Cooperation Cluster）	每个 UE 选择前 L 个最
 Step 3: 遍历每个 UE，检测是否有相同 AP 的干扰	如果 两个 UE 的 DCC 有重叠 AP，则标记为干扰	if set(dcc[ue.id]) & set(dcc[neighbor_ue.id]):
 Step 4: 分配导频（Pilot Assignment）	给 干扰最小的 UE 先分配导频，确保相同 AP 服务的 UE 尽量使用不同导频
 
-函数部分解释
-1. assign_pilots 函数
-python
+# 导频分配（Pilot Assignment）
 
-Collapse
+## 1.1 理论基础
 
-Wrap
+在 Cell-Free Massive MIMO 系统中，导频分配是上行信道估计的关键步骤。根据书中的《Section 4.1》，系统使用一组 $\tau_p$ 个相互正交的导频序列 $\{\phi_1, \dots, \phi_{\tau_p}\} \in \mathbb{C}^{\tau_p}$，这些导频满足正交性条件：
 
-Copy
-def assign_pilots(ue_list, ap_list, beta_matrix, L=3, tau_p=None):
-功能
-基于大尺度衰落系数 beta_matrix，为每个 UE 选择前 L 个最强 AP，形成 DCC。
-为每个 UE 分配导频，尽量避免 DCC 有重叠的 UE 使用相同导频，减少导频污染。
-主要步骤
-初始化导频数：
-python
+$$
+\phi_{t_1}^H \phi_{t_2} = \begin{cases}
+\tau_p, & \text{if } t_1 = t_2 \\
+0, & \text{if } t_1 \neq t_2
+\end{cases}
+$$
 
-Collapse
+每个用户设备（UE） $k$ 被分配一个导频索引 $t_k \in \{1, \dots, \tau_p\}$。定义集合：
 
-Wrap
+$$
+P_k = \{ i : t_i = t_k, i = 1, \dots, K \}
+$$
 
-Copy
-if tau_p is None:
-    tau_p = len(ue_list)
-如果未指定 tau_p，则默认导频数等于 UE 数量，表示每个 UE 可以获得唯一的导频。若 tau_p < len(ue_list)，则会发生导频复用。
-形成 DCC：
-python
+表示所有使用与 UE $k$ 相同导频的 UE。
 
-Collapse
+由于 UE 数量 $K$ 通常大于可用导频数 $\tau_p$，多个 UE 共享同一个导频，这种现象称为**导频污染（pilot contamination）**，会导致信道估计时共享导频的 UE 之间产生干扰。
 
-Wrap
+## 1.2 代码实现
 
-Copy
-dcc = {}
-for ue in ue_list:
-    ranked_aps = np.argsort(beta_matrix[:, ue.id])[::-1][:L]
-    dcc[ue.id] = [ap.id for ap in ap_list if ap.id in ranked_aps]
-对每个 UE，从 beta_matrix[:, ue.id] 中提取所有 AP 的大尺度衰落系数。
-使用 np.argsort(...)[::-1] 按降序排列，[:L] 取前 L 个最大值的索引（即最强 AP）。
-将这些 AP 的 id 存储在 dcc[ue.id] 中。
-导频分配（贪心算法）：
-python
+在你的代码中，`assign_pilots` 函数负责为每个 UE 分配导频，并结合**动态合作聚类（Dynamic Cooperation Clustering, DCC）**优化分配过程。
 
-Collapse
+### **实现步骤**
 
-Wrap
+#### 选择服务 AP（DCC）：
+对于每个 UE $k$，根据大尺度衰落系数 $\beta_{l,k}$（通常存储在 `beta_matrix` 中），选择信号强度最强的 $L$ 个接入点（AP）作为其服务 AP 集合 $M_k$。
 
-Copy
-pilot_assignments = {}
-available_pilots = list(range(tau_p))
+**代码示例：**
+```python
+ranked_aps = np.argsort(beta_matrix[:, ue.id])[::-1][:L]
+dcc[ue.id] = [ap.id for ap in ap_list if ap.id in ranked_aps]
+```
+
+#### **导频分配策略：**
+- 使用**贪心算法**，尽量避免 DCC 有重叠的 UE 分配到相同的导频，以减少导频污染。
+- 对于每个 UE $k$：
+  1. 检查其服务 AP 集合 $M_k$ 与已分配导频的其他 UE 的 $M_i$ 是否有交集。
+  2. 如果有交集，则将这些 UE 使用的导频加入“不可用”集合。
+  3. 从剩余的可用导频 $\{1, \dots, \tau_p\}$ 中选择一个未被标记的导频分配给 UE $k$。
+  4. 如果所有导频都不可用（即 $\tau_p < K$ 时无法完全避免重叠），则选择一个默认导频（例如使用最少的导频）。
+
+**代码示例：**
+```python
 for ue in ue_list:
     used_pilots = set()
     for neighbor_ue in ue_list:
@@ -219,101 +217,82 @@ for ue in ue_list:
             pilot_assignments[ue.id] = pilot
             break
     if ue.id not in pilot_assignments:
-        pilot_assignments[ue.id] = available_pilots[np.argmin(list(used_pilots))] if used_pilots else available_pilots[0]
-初始化可用导频集合 available_pilots 为 [0, 1, ..., tau_p-1]。
-对每个 UE：
-检查其他已分配导频的 UE，若它们的 DCC 与当前 UE 的 DCC 有交集（set(dcc[ue.id]) & set(dcc[neighbor_ue.id])），则将它们的导频加入 used_pilots。
-从 available_pilots 中选择一个不在 used_pilots 中的导频分配给当前 UE。
-如果所有导频都被占用（used_pilots 包含所有导频），则选择一个备选导频（这里简单取第一个可用导频或最小干扰的导频）。
-输出
-pilot_assignments：每个 UE 的导频分配。
-dcc：每个 UE 的服务 AP 集合。
-2. mmse_estimate 函数
-python
+        pilot_assignments[ue.id] = available_pilots[0]  # 默认分配
+```
 
-Collapse
+#### **与理论的联系：**
+- 通过避免 DCC 重叠的 UE 使用相同导频，减少了集合 $P_k$ 中干扰 UE 的数量，从而降低了导频污染的影响。
+- 但由于 $\tau_p < K$，完全消除导频共享是不可能的，导频污染仍然是系统性能的限制因素。
 
-Wrap
+---
 
-Copy
-def mmse_estimate(ap_list, ue_list, H_true, pilot_assignments, p, sigma2):
-功能
-基于接收到的导频信号，使用 MMSE 方法估计信道矩阵 H_hat。
+# **导频信号（Pilot Signal）**
 
-主要步骤
-初始化和生成正交导频序列：
-python
+## **2.1 理论基础**
 
-Collapse
+在导频传输阶段，每个 UE $k$ 发送其导频信号：
 
-Wrap
+$$
+s_k = \eta_k \phi_{t_k}
+$$
 
-Copy
-num_APs = len(ap_list)
-num_UEs = len(ue_list)
-N = ap_list[0].antennas
-tau_p = len(ue_list)
+其中：
+- $\eta_k$ 是上行导频功率，
+- $\phi_{t_k}$ 是分配的导频序列。
+
+AP $l$ 接收到的导频信号为：
+
+$$
+Y_{\text{pilot},l} = \sum_{i=1}^{K} \eta_i h_{il} \phi_{t_i}^T + N_l
+$$
+
+其中：
+- $h_{il}$ 是 UE $i$ 到 AP $l$ 的信道向量。
+- $N_l \sim \mathcal{N}_C(0, \sigma_{ul}^2 I_N)$ 是加性高斯白噪声。
+
+为了估计信道 $h_{kl}$，AP $l$ 将接收信号与归一化的导频 $\phi_{t_k}^* / \tau_p$ 相乘，得到：
+
+$$
+y_{\text{pilot}, t_k l} = \frac{Y_{\text{pilot},l} \phi_{t_k}^*}{\tau_p} = \frac{\eta_k}{\tau_p} h_{kl} + \sum_{i \in P_k \setminus \{k\}} \frac{\eta_i}{\tau_p} h_{il} + n_{t_k l}
+$$
+
+其中：
+- 期望项 $\frac{\eta_k}{\tau_p} h_{kl}$ 是 UE $k$ 的信道贡献。
+- 干扰项 $\sum_{i \in P_k \setminus \{k\}} \frac{\eta_i}{\tau_p} h_{il}$ 是导频污染引起的干扰。
+- 噪声项 $n_{t_k l} \sim \mathcal{N}_C(0, \sigma_{ul}^2 I_N)$。
+
+## **2.2 代码实现**
+
+在 `mmse_estimate` 函数中，模拟了 AP 接收到的导频信号。
+
+### **实现步骤**
+
+#### 生成正交导频序列：
+
+使用 $\tau_p \times \tau_p$ 的 FFT 矩阵或单位矩阵的列作为导频序列，确保正交性。
+
+**代码示例：**
+```python
 pilots = np.fft.fft(np.eye(tau_p)) / np.sqrt(tau_p)
-tau_p 默认等于 UE 数量。
-使用 FFT 生成正交导频矩阵 pilots，形状为 (tau_p, tau_p)，每列是一个正交导频序列。
-模拟 AP 接收导频信号：
-python
+```
 
-Collapse
+#### **计算接收信号：**
+对于每个 AP $l$ 和导频索引 $t$，计算使用导频 $t$ 的所有 UE 的信道和，并添加噪声。
 
-Wrap
-
-Copy
-Y_pilot = np.zeros((num_APs, N, tau_p), dtype=complex)
-for l, ap in enumerate(ap_list):
+**代码示例：**
+```python
+for l in range(num_APs):
     for t in range(tau_p):
         ue_indices = [ue.id for ue in ue_list if pilot_assignments[ue.id] == t]
         if ue_indices:
             H_sum = np.sum(H_true[l, :, ue_indices], axis=0)
         else:
             H_sum = np.zeros(N, dtype=complex)
-        noise = (np.random.randn(N) + 1j * np.random.randn(N)) * np.sqrt(sigma2)
+        noise = (np.random.randn(N) + 1j * np.random.randn(N)) * np.sqrt(sigma2) / np.sqrt(2)
         Y_pilot[l, :, t] = np.sqrt(p) * H_sum + noise
-Y_pilot 形状为 (num_APs, N, tau_p)，表示每个 AP 在每个导频时隙接收到的信号。
-对于每个 AP l 和导频时隙 t：
-找到使用导频 t 的所有 UE（ue_indices）。
-计算这些 UE 的真实信道和 H_sum。
-添加高斯噪声，得到接收信号 Y_pilot[l, :, t]。
-MMSE 估计：
-python
+```
 
-Collapse
+---
 
-Wrap
+**完整的 MMSE 信道估计、导频污染等内容，可继续添加。**
 
-Copy
-H_hat = np.zeros_like(H_true)
-for l, ap in enumerate(ap_list):
-    for k, ue in enumerate(ue_list):
-        t = pilot_assignments[ue.id]
-        Psi = p * tau_p * np.sum(
-            [H_true[l, :, i].conj() @ H_true[l, :, i].T for i in range(num_UEs) if pilot_assignments[i] == t], 
-            axis=0
-        ) + sigma2 * np.eye(N)
-        H_hat[l, :, k] = np.sqrt(p) * np.linalg.inv(Psi) @ Y_pilot[l, :, t]
-对每个 AP l 和 UE k：
-获取该 UE 使用的导频 t。
-计算 Psi 矩阵，表示所有使用导频 t 的 UE 的干扰加上噪声。
-使用 MMSE 公式 H_hat[l, :, k] = sqrt(p) * inv(Psi) @ Y_pilot[l, :, t] 估计信道。
-添加估计误差：
-python
-
-Collapse
-
-Wrap
-
-Copy
-error_shape = H_hat.shape
-estimation_error = np.sqrt(ESTIMATION_ERROR_VAR / 2) * (
-    np.random.randn(*error_shape) + 1j * np.random.randn(*error_shape)
-)
-return H_hat + estimation_error
-生成一个与 H_hat 形状相同的复高斯噪声，标准差由 ESTIMATION_ERROR_VAR 确定。
-将噪声加到 H_hat 上，模拟实际系统中的估计不完美。
-输出
-H_hat：估计的信道矩阵，包含估计误差。

@@ -11,7 +11,7 @@ Cell-Free-MIMO/
 ├── main.py              # 主仿真循环
 ├── config.py            # 系统参数配置
 ├── objects.py           # AP/UE 类定义
-├── channel_estimation.py# MMSE
+├── channel_estimation.py# 导频生成 信道估计值
 ├── pilot_assignment.py  # 导频分配与动态协作聚类（DCC）：先根据主AP（或大尺度衰落）选取服务 AP 集合，再利用邻域信息（DCC）选择导频，从而减少导频污染
 ├── uplink.py            # 上行链路 SE 计算（含 MMSE/MR 合并）
 ├── downlink.py          # 下行链路预编码与 SE 计算

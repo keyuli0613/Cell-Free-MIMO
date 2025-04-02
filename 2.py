@@ -1,4 +1,4 @@
-import numpy as np
+import numpy as np 
 import matplotlib.pyplot as plt
 from config import NUM_AP, NUM_UE, ANTENNAS_PER_AP, TAU_C, TAU_P, AREA_SIZE, UE_MAX_POWER, MC_TRIALS, NOISE_UL, NOISE_DL, RHO_TOT
 from objects import AP, UE
@@ -22,85 +22,117 @@ def generate_spatial_correlation(N, angle_spread_deg=10):
     R = a.T @ a.conj() / len(angles)
     return R
 
-def run_simulation(mc_trials=MC_TRIALS):
+def run_simulation(mc_trials=MC_TRIALS, debug=False):
     uplink_SE_all = []
-    # 我们为下行不同预编码方案分别保存 SE（例如 MR、L-MMSE、P-MMSE）
     downlink_SE_all = {'MR': [], 'L-MMSE': []}
     
     for trial in range(mc_trials):
-        # -------------------------------
+        print(f"\n=== Trial {trial+1} ===")
         # 1) 初始化 AP 与 UE 对象（位置随机）
-        # -------------------------------
         ap_list = [AP(ap_id=l, 
-                     position=[np.random.uniform(0, AREA_SIZE), 
-                               np.random.uniform(0, AREA_SIZE), 10.0],
-                     antennas=ANTENNAS_PER_AP)
+                      position=[np.random.uniform(0, AREA_SIZE), 
+                                np.random.uniform(0, AREA_SIZE), 10.0],
+                      antennas=ANTENNAS_PER_AP)
                    for l in range(NUM_AP)]
         ue_list = [UE(ue_id=k, 
-                     position=[np.random.uniform(0, AREA_SIZE), 
-                               np.random.uniform(0, AREA_SIZE), 1.5])
+                      position=[np.random.uniform(0, AREA_SIZE), 
+                                np.random.uniform(0, AREA_SIZE), 1.5])
                    for k in range(NUM_UE)]
+        if debug and trial == 0:
+            print("AP位置：")
+            for ap in ap_list:
+                print(f"AP {ap.id}: {ap.position}")
+            print("UE位置：")
+            for ue in ue_list:
+                print(f"UE {ue.id}: {ue.position}")
         
-        # -------------------------------
-        # 2) 计算大尺度衰落系数 beta (例如使用3GPP UMa模型)
-        # -------------------------------
+        # 2) 计算大尺度衰落系数 beta（例如使用3GPP UMa模型）
         beta_matrix = np.zeros((NUM_AP, NUM_UE))
         for l, ap in enumerate(ap_list):
             for k, ue in enumerate(ue_list):
                 distance = np.linalg.norm(np.array(ap.position) - np.array(ue.position))
-                # 注意：距离单位转换（例如米转千米）根据具体模型调整
+                # 注意：距离单位转换，根据具体模型调整（此处假定距离为米）
                 path_loss = 10 ** ( - (128.1 + 37.6 * np.log10(distance/1000)) / 10 )
                 shadowing = 10 ** (np.random.normal(0, 8) / 10)  # 8dB 阴影
                 beta_matrix[l, k] = path_loss * shadowing
+        if debug and trial == 0:
+            print("大尺度衰落系数 Beta Matrix：")
+            print(beta_matrix)
+            plt.figure()
+            plt.imshow(beta_matrix, aspect='auto', cmap='viridis')
+            plt.title("Beta Matrix (Large-scale fading)")
+            plt.xlabel("UE index")
+            plt.ylabel("AP index")
+            plt.colorbar()
+            plt.show()
         
-        # -------------------------------
-        # 3) 生成空间相关矩阵 R (形状: (N, N, NUM_AP, NUM_UE))
-        # -------------------------------
+        # 3) 生成空间相关矩阵 R (形状: (ANTENNAS_PER_AP, ANTENNAS_PER_AP, NUM_AP, NUM_UE))
         R = np.zeros((ANTENNAS_PER_AP, ANTENNAS_PER_AP, NUM_AP, NUM_UE), dtype=complex)
         for l in range(NUM_AP):
             for k in range(NUM_UE):
                 R[:,:,l,k] = beta_matrix[l, k] * generate_spatial_correlation(ANTENNAS_PER_AP)
+        if debug and trial == 0:
+            print("空间相关矩阵 R (AP 0, UE 0)：")
+            print(R[:,:,0,0])
+            plt.figure()
+            plt.imshow(np.abs(R[:,:,0,0]), cmap='viridis')
+            plt.title("Magnitude of R (AP 0, UE 0)")
+            plt.xlabel("Antenna index")
+            plt.ylabel("Antenna index")
+            plt.colorbar()
+            plt.show()
         
-        # -------------------------------
         # 4) 生成真实信道 H_true (形状: (NUM_AP, ANTENNAS_PER_AP, NUM_UE))
-        # -------------------------------
         H_true = np.zeros((NUM_AP, ANTENNAS_PER_AP, NUM_UE), dtype=complex)
         for l in range(NUM_AP):
             for k in range(NUM_UE):
                 Rsqrt = sqrtm(R[:,:,l,k])
                 noise_vec = (np.random.randn(ANTENNAS_PER_AP) + 1j*np.random.randn(ANTENNAS_PER_AP)) / np.sqrt(2)
                 H_true[l, :, k] = Rsqrt @ noise_vec
+        if debug and trial == 0:
+            print("真实信道 H_true (AP 0, UE 0) 的幅值：")
+            print(np.abs(H_true[0,:,0]))
+            plt.figure()
+            plt.stem(np.abs(H_true[0,:,0]))
+            plt.title("Magnitude of H_true (AP 0, UE 0)")
+            plt.xlabel("Antenna index")
+            plt.ylabel("Magnitude")
+            plt.show()
         
-        # -------------------------------
         # 5) 导频分配与形成 DCC（基于 pilot_assignment 算法）
-        # -------------------------------
         pilot_assignments, dcc = assign_pilots(ue_list, ap_list, beta_matrix)
         for ue in ue_list:
             ue.assigned_ap_ids = dcc[ue.id]
-        
-        # 计算 serving AP 的数量
-        serving_ap_ids = set()
-        for ue in ue_list:
-            serving_ap_ids.update(ue.assigned_ap_ids)
-        num_serving_aps = len(serving_ap_ids)
-        
-        print("serving_aps:", num_serving_aps)
         # 构造 D 矩阵，D[l, k]=1 表示 AP l 为 UE k 服务
         D = np.zeros((NUM_AP, NUM_UE), dtype=int)
         for ue in ue_list:
             for ap_id in ue.assigned_ap_ids:
                 D[ap_id, ue.id] = 1
+        if debug and trial == 0:
+            print("导频分配结果：", pilot_assignments)
+            print("D矩阵 (AP-UE 关联)：")
+            print(D)
+            plt.figure()
+            plt.imshow(D, cmap='gray', interpolation='nearest')
+            plt.title("D Matrix (AP-UE Association)")
+            plt.xlabel("UE index")
+            plt.ylabel("AP index")
+            plt.colorbar()
+            plt.show()
         
-        
-        # -------------------------------
         # 6) 信道估计：利用上行导频生成 MMSE 估计 H_hat（形状同 H_true）
-        # -------------------------------
         H_hat = mmse_estimate(ap_list, ue_list, H_true, pilot_assignments, UE_MAX_POWER, NOISE_UL)
-        # 此处保证上行估计 H_hat 将用于后续的上行与下行处理（TDD 互易性）
+        if debug and trial == 0:
+            print("MMSE 信道估计 H_hat (AP 0, UE 0) 的幅值：")
+            print(np.abs(H_hat[0,:,0]))
+            plt.figure()
+            plt.stem(np.abs(H_hat[0,:,0]))
+            plt.title("Magnitude of H_hat (AP 0, UE 0)")
+            plt.xlabel("Antenna index")
+            plt.ylabel("Magnitude")
+            plt.show()
         
-        # -------------------------------
         # 7) 上行 SE 计算：利用 H_hat 和 H_true 计算上行 SE
-        # -------------------------------
         se_list_uplink = []
         for ue in ue_list:
             serving_aps = [ap for ap in ap_list if ap.id in ue.assigned_ap_ids]
@@ -122,21 +154,37 @@ def run_simulation(mc_trials=MC_TRIALS):
                 se_list_uplink.append(se_val)
         avg_uplink_SE = np.mean(se_list_uplink)
         uplink_SE_all.append(avg_uplink_SE)
+        if debug and trial == 0:
+            print("上行 SE (每个UE)：")
+            print(se_list_uplink)
         
-        # -------------------------------
-        
-        # 在run_simulation函数中修改以下部分
-
-        # 8) 下行 SE 计算
+        # 8) 下行 SE 计算及预编码功率分配
         gain_matrix = np.zeros((NUM_AP, NUM_UE))
         for l in range(NUM_AP):
             for k in range(NUM_UE):
                 gain_matrix[l, k] = np.real(np.trace(R[:,:,l,k]))  # 使用大尺度衰落系数
-
-        # 使用新的平方根加权功率分配
-        # rho_dist = centralized_power_allocation(gain_matrix, D, scheme='proportional')
         rho_dist = power_allocation(gain_matrix, D, RHO_TOT)
-
+        if debug and trial == 0:
+            print("增益矩阵 Gain Matrix：")
+            print(gain_matrix)
+            plt.figure()
+            plt.imshow(gain_matrix, aspect='auto', cmap='viridis')
+            plt.title("Gain Matrix")
+            plt.xlabel("UE index")
+            plt.ylabel("AP index")
+            plt.colorbar()
+            plt.show()
+            
+            print("功率分配矩阵 (rho_dist)：")
+            print(rho_dist)
+            plt.figure()
+            plt.imshow(rho_dist, aspect='auto', cmap='plasma')
+            plt.title("Power Allocation (rho_dist)")
+            plt.xlabel("UE index")
+            plt.ylabel("AP index")
+            plt.colorbar()
+            plt.show()
+        
         for scheme in ['MR', 'L-MMSE']:
             se_list_downlink = []
             scheme_total_energy = 0.0
@@ -163,7 +211,10 @@ def run_simulation(mc_trials=MC_TRIALS):
                 se_list_downlink.append(se_val)
                 scheme_total_energy += total_energy
             downlink_SE_all[scheme].append(np.mean(se_list_downlink))
-            print(f"[Trial {trial+1}] Total energy for scheme {scheme}: {scheme_total_energy:.4f}")
+            print(f"[Trial {trial+1}] 预编码方案 {scheme} 的总能量: {scheme_total_energy:.4f}")
+            if debug and trial == 0:
+                print(f"下行 SE ({scheme}) (每个UE)：")
+                print(se_list_downlink)
     
     return uplink_SE_all, downlink_SE_all
 
@@ -193,12 +244,12 @@ def plot_cdf_dict(schemes_dict, title, xlabel):
     plt.show()
 
 def main():
-    uplink_SE_all, downlink_SE_all = run_simulation(mc_trials=50)
+    # debug设为True时，第1个试验会显示中间过程的结果
+    uplink_SE_all, downlink_SE_all = run_simulation(mc_trials=50, debug=True)
     
-    print("Average Uplink SE:", np.mean(uplink_SE_all))
-    print("Average Downlink SE (MR):", np.mean(downlink_SE_all['MR']))
-    print("Average Downlink SE (L-MMSE):", np.mean(downlink_SE_all['L-MMSE']))
-    # print("Average Downlink SE (P-MMSE):", np.mean(downlink_SE_all['P-MMSE']))
+    print("平均上行SE:", np.mean(uplink_SE_all))
+    print("平均下行SE (MR):", np.mean(downlink_SE_all['MR']))
+    print("平均下行SE (L-MMSE):", np.mean(downlink_SE_all['L-MMSE']))
     
     plot_cdf(uplink_SE_all, "Uplink SE CDF", "SE (bit/s/Hz)")
     plot_cdf_dict(downlink_SE_all, "Downlink SE CDF", "SE (bit/s/Hz)")

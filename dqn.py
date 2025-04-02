@@ -1,4 +1,4 @@
-import random
+import random 
 import numpy as np
 from collections import deque
 import torch
@@ -61,7 +61,6 @@ class DQNAgent:
             self.epsilon_start - (self.epsilon_start - self.epsilon_final)
             * self.steps_done / self.epsilon_decay
         )
-
         self.steps_done += 1
         if random.random() < epsilon:
             return random.randrange(self.action_dim)
@@ -132,8 +131,13 @@ def train_dqn(num_episodes=100, batch_size=128, target_update=50):
         total_reward = 0
 
         for t in range(len(user_data)):
+            # 在这里打印当前状态 (仅在每10个 episode 打印，避免过多输出)
+            if episode % 10 == 0:  
+                print(f"[Debug] Episode={episode}, Step={t}, State={state}")
+
             action = agent.select_action(state)
             next_state, reward, done = env.step(action)
+
             # Normalize next_state
             next_state = np.array([
                 (next_state[0] - min_UE) / (max_UE - min_UE),
@@ -145,7 +149,13 @@ def train_dqn(num_episodes=100, batch_size=128, target_update=50):
             max_SE, max_energy = 10.0, 1000.0  # Placeholder values
             lambda_energy = 0.1  # Example: adjust based on env
             normalized_reward = (reward[0] / max_SE) - lambda_energy * (reward[1] / max_energy) if isinstance(reward, tuple) else reward
-            
+            # normalized_reward = np.log(1 + reward[0]) - lambda_energy * np.sqrt(reward[1])
+            # if isinstance(reward, tuple):  # 如果 reward 是 (SE, Energy)
+            #     raw_se, raw_energy = reward
+            #     normalized_reward = np.log(1 + raw_se) - lambda_energy * np.sqrt(raw_energy)
+            # else:  # reward 是单个数值
+            #     normalized_reward = reward
+
             agent.replay_buffer.push(state, action, normalized_reward, next_state, done)
             agent.update(batch_size)
             state = next_state
@@ -172,4 +182,4 @@ def train_dqn(num_episodes=100, batch_size=128, target_update=50):
     plt.show()
 
 if __name__ == "__main__":
-    train_dqn(num_episodes=200)
+    train_dqn(num_episodes=100)

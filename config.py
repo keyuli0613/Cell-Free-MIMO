@@ -3,8 +3,8 @@
 import numpy as np
 
 # 网络参数
-NUM_AP = 15          # AP 数量
-NUM_UE = 10            # UE 数量
+NUM_AP =  16        # AP 数量
+NUM_UE =  16           # UE 数量
 ANTENNAS_PER_AP = 4    # 每个AP的天线数
 
 # 相干块参数
@@ -47,3 +47,10 @@ NOISE_DL = 1e-10       # 下行噪声功率 (瓦特)
 
 # 信道估计参数
 ESTIMATION_ERROR_VAR = 0.1  # 信道估计误差方差（0.1表示10%误差）
+
+#能耗计算
+
+POWERTRANS = 2.5 # 发射放大器效率
+POWERPROC = 1000 #处理功耗系数
+POWERCIR = 6 # 每个AP的电路功率
+SLEEP = 0.2 #睡眠因子

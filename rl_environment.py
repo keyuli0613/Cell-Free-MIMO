@@ -1,20 +1,20 @@
 import numpy as np
-from config import NUM_AP, ANTENNAS_PER_AP, TAU_C, TAU_P, AREA_SIZE, UE_MAX_POWER, RHO_TOT, NOISE_UL, NOISE_DL
+from config import NUM_AP, ANTENNAS_PER_AP, TAU_C, TAU_P, AREA_SIZE, UE_MAX_POWER, RHO_TOT, NOISE_UL, NOISE_DL, POWERTRANS, POWERCIR, POWERPROC, SLEEP
 from objects import AP, UE
 from pilot_assignment import assign_pilots
 from channel_estimation import mmse_estimate
 from downlink import compute_downlink_SE, power_allocation
 from scipy.linalg import sqrtm
+import time
 
 # 固定预编码方案列表：0->MR, 1->L-MMSE
 PRECODING_SCHEMES = ['MR', 'L-MMSE']
-
 class RLEnvironment:
     def __init__(self, user_data,
                  init_cluster_size=5,      # 初始聚类大小
                  init_precoding_idx=0,     # 初始预编码方案索引
                  init_rho_tot=RHO_TOT,     # 初始下行总功率
-                 lambda_energy=0.001):      # 能耗权重
+                 lambda_energy=0.01):      # 能耗权重
         """
         初始化环境，加入动态用户数量数据。
         :param user_data: 包含 72 个值的列表，表示一天内每 20 分钟的用户数量
@@ -94,8 +94,55 @@ class RLEnvironment:
         for ue in ue_list:
             for ap_id in ue.assigned_ap_ids:
                 D[ap_id, ue.id] = 1
+         # --------------------- 新增 Gamma 计算 ---------------------
+        if hasattr(self, 'tau_p') and self.tau_p is not None:
+            tau_p_val = self.tau_p
+        else:
+            tau_p_val = self.num_UE
 
+        epsilon = 1e-2  # 防止除零
+        Gamma = np.zeros((self.num_AP, self.num_UE))
+        # 对于每个 AP 和每个导频
+        for l in range(self.num_AP):
+            for t in range(tau_p_val):
+                # 找出使用导频 t 的所有 UE，注意 pilot_assignments 中的键为 ue id，值为导频索引
+                pilot_UEs = [k for k in range(self.num_UE) if pilot_assignments.get(k) == t]
+                if len(pilot_UEs) > 0:
+                    sum_beta = np.sum(beta_matrix[l, pilot_UEs])
+                    for k in pilot_UEs:
+                        # Gamma 的公式：10*log10((tau_p*(beta^2))/(tau_p*sum_beta+epsilon))
+                        Gamma[l, k] = 10 * np.log10((tau_p_val * (beta_matrix[l, k] ** 2)) / (tau_p_val * sum_beta + epsilon))
+        # -----------------------------------------------------------
+
+        # Delta：对于每个 AP，将 UE 按 beta 从大到小排序，
+        # 直到累计 beta 占总 beta 的比例达到 90%，将这些 UE 标记为 1，
+        # 同时记录 tau_sl（每个 AP 的服务 UE 数量）
+        Delta = np.zeros((self.num_AP, self.num_UE), dtype=int)
+        tau_sl = np.zeros(self.num_AP, dtype=int)
+        for l in range(self.num_AP):
+            gains = beta_matrix[l, :]  # 对应 AP l 对所有 UE 的大尺度衰落系数
+            sorted_indices = np.argsort(gains)[::-1]  # 降序排列的 UE 索引
+            sorted_gains = gains[sorted_indices]
+            sum_gain = np.sum(sorted_gains)
+            collected_gain = 0
+            index_gain = 0
+            # 限制最多选择的 UE 数量为 self.cluster_size（或不超过总 UE 数量）
+            max_ues = self.cluster_size if self.cluster_size <= self.num_UE else self.num_UE
+            while (index_gain < max_ues) and (collected_gain / sum_gain < 0.9):
+                collected_gain += sorted_gains[index_gain]
+                index_gain += 1
+            tau_sl[l] = index_gain
+            Delta[l, sorted_indices[:index_gain]] = 1
+        # -----------------------------------------------------------
+
+        # 计算 serving AP 的数量
+        serving_ap_ids = set()
+        for ue in ue_list:
+            serving_ap_ids.update(ue.assigned_ap_ids)
+        num_serving_aps = len(serving_ap_ids)
+        
         # 信道估计
+        
         H_hat = mmse_estimate(ap_list, ue_list, H_true, pilot_assignments, UE_MAX_POWER, NOISE_UL)
 
         # 功率分配
@@ -108,40 +155,41 @@ class RLEnvironment:
         # 计算 SE 和能耗
         se_list = []
         energy_list = []
+    
+        tau_c = self.tau_c  # 从配置中读取
         for ue in ue_list:
-            serving_aps = [ap for ap in ap_list if ap.id in ue.assigned_ap_ids]
-            if not serving_aps:
-                se_list.append(0.0)
-                energy_list.append(0.0)
-                continue
             se_val, energy = compute_downlink_SE(
-                serving_aps=serving_aps,
-                H_hat=H_hat,
-                H_true=H_true,
+                serving_aps=ap_list,  # 这里所有 AP 均参与计算
                 ue_id=ue.id,
                 all_ues=ue_list,
                 lN=ANTENNAS_PER_AP,
-                p=UE_MAX_POWER,
                 sigma2=NOISE_DL,
-                precoding_scheme=PRECODING_SCHEMES[self.precoding_idx],
                 rho_dist=rho_dist,
-                D=D,
                 pilot_assignments=pilot_assignments,
-                all_aps_global=ap_list
+                beta_matrix=beta_matrix,
+                gamma_matrix=Gamma,
+                Delta=Delta,
+                tau_sl=tau_sl,
+                tau_c=tau_c,
+                tau_p=tau_p_val
             )
             se_list.append(se_val)
             energy_list.append(energy)
         avg_SE = np.mean(se_list)
         total_energy = np.sum(energy_list)
-        return avg_SE, total_energy
 
+        total_power = POWERTRANS * total_energy + POWERPROC + (POWERCIR * np.sum(D, axis=0).sum() +
+                    SLEEP * POWERCIR * (self.num_AP - np.sum(D, axis=0).sum()))
+        print("AVGse:", avg_SE)
+        return avg_SE, total_power
+    
     def step(self, action):
         """
         执行一步动作，更新环境状态。
         动作空间（5 个动作）：
           0: 聚类大小 +1
           1: 聚类大小 -1
-          2: 切换预编码方案（MR 和 L-MMSE 之间切换）
+          2: 切换预编码方案
           3: 功率 +0.5
           4: 功率 -0.5
         """
@@ -156,11 +204,15 @@ class RLEnvironment:
         elif action == 4:
             self.rho_tot = max(self.rho_tot - 0.5, 0.1)
 
-        avg_SE, total_energy = self.simulate_trial()
+        avg_SE, total_power = self.simulate_trial()
         # max_SE = 10.0  # 需根据实际环境调整
         # max_energy = 1000.0  # 需根据实际环境调整
         # reward = (avg_SE / max_SE) - self.lambda_energy * (total_energy / max_energy)
-        reward = avg_SE + self.lambda_energy * total_energy  # 优化 SE 并惩罚能耗
+        # reward = avg_SE + self.lambda_energy * total_energy  # 优化 SE 并惩罚能耗
+
+        
+        reward = np.log(1 + avg_SE) -  self.lambda_energy* np.log(1 + total_power)
+
 
         if np.isnan(reward):
             reward = 0.0
@@ -177,7 +229,8 @@ class RLEnvironment:
 if __name__ == "__main__":
     # 示例用户数量数据（一天 72 个时间步）
     # user_data = [50 + int(50 * np.sin(np.pi * t / 36)) for t in range(72)]
-    user_data = [16 for _ in range(72)]
+    user_data = [7 for _ in range(72)]
+
 
     env = RLEnvironment(user_data=user_data)
     state = env.reset()
@@ -185,4 +238,5 @@ if __name__ == "__main__":
     for _ in range(10):
         action = np.random.randint(0, 5)
         next_state, reward, done = env.step(action)
-        print(f"Step {_+1}: Action={action}, Reward={reward}, Done={done}, Next State={next_state}")
+        # print(f"Step {_+1}: Action={action}, Reward={reward}, Done={done}, Next State={next_state}")
+        print()
